@@ -356,7 +356,7 @@ if __name__ == "__main__":
             <h2>Google Ads MCP</h2>
             <ul>
               <li>MCP Endpoint: <code>{PUBLIC_BASE}/mcp</code></li>
-              <li>OAuth Metadata: <a href="{PUBLIC_BASE}/.well-known/oauth-authorization-server">.well-known/oauth-authorization-server</a></li>
+              <li>OAuth Metadata: <a href="{PUBLIC_BASE}/well-known/oauth-authorization-server">well-known/oauth-authorization-server</a></li>
               <li><b>Start Login:</b> <a href="{PUBLIC_BASE}/oauth/login">/oauth/login</a></li>
               <li>Callback (register in Google Cloud): <code>{PUBLIC_BASE}/oauth/callback</code></li>
             </ul>
@@ -382,7 +382,7 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"Failed to mount oauth routes: {e}")
         logger.info("✅ OAuth endpoints available:")
-        logger.info("   - GET /.well-known/oauth-authorization-server")
+        logger.info("   - GET /well-known/oauth-authorization-server")
         logger.info("   - GET /oauth/login")
         logger.info("   - GET /oauth/callback")
     else:
