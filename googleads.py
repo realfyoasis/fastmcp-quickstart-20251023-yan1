@@ -50,6 +50,7 @@ def _resolve_creds(auth: dict) -> dict:
     if "access_token" in auth:
         return {"access_token": auth["access_token"]}
 
+
     if "secret_version_name" in auth:
         name = auth["secret_version_name"]
         client = secretmanager.SecretManagerServiceClient()
