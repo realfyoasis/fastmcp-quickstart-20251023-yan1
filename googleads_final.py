@@ -14,7 +14,7 @@ from typing import List, Dict, Optional
 from dataclasses import is_dataclass, asdict
 from types import SimpleNamespace
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from google.cloud import secretmanager
 from google.api_core.exceptions import NotFound
@@ -91,33 +91,69 @@ mcp = FastMCP("Google Ads MCP")
 # --------------------------------------------------------------------
 # Helper Functions
 # --------------------------------------------------------------------
-def _resolve_creds(auth: dict) -> dict:
+def _get_auth_from_context(ctx: Context) -> dict:
+    """
+    Extract OAuth credentials from FastMCP Context.
+    When user connects via Claude Desktop OAuth, credentials are automatically
+    injected into the context.
+    """
+    # Check if OAuth token is in context
+    if hasattr(ctx, 'access_token') and ctx.access_token:
+        return {"access_token": ctx.access_token}
+    
+    # Check meta/authorization for OAuth tokens
+    if hasattr(ctx, 'meta') and ctx.meta:
+        auth_header = ctx.meta.get('authorization') or ctx.meta.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header[7:]  # Remove 'Bearer ' prefix
+            return {"access_token": token}
+    
+    # Fallback: no OAuth credentials found
+    # This happens when testing locally without OAuth
+    raise RuntimeError(
+        "No OAuth credentials found. "
+        "Please connect via Claude Desktop or provide auth parameter manually."
+    )
+
+def _resolve_creds(auth: Optional[dict] = None, ctx: Optional[Context] = None) -> dict:
     """
     Resolve credentials from various auth formats.
-    Supports: refresh_token, access_token, secret_version_name
+    Priority: explicit auth dict > OAuth from context > error
+    
+    Supports: 
+    - OAuth from Context (automatic when using Claude Desktop)
+    - refresh_token, access_token, secret_version_name (manual testing)
     """
-    if not isinstance(auth, dict):
-        raise ValueError("auth must be an object")
+    # If explicit auth provided, use it (for manual testing)
+    if auth and isinstance(auth, dict):
+        if "refresh_token" in auth:
+            return {"refresh_token": auth["refresh_token"]}
 
-    if "refresh_token" in auth:
-        return {"refresh_token": auth["refresh_token"]}
+        if "access_token" in auth:
+            return {"access_token": auth["access_token"]}
 
-    if "access_token" in auth:
-        return {"access_token": auth["access_token"]}
-
-    if "secret_version_name" in auth:
-        if not secret_manager_client:
-            raise RuntimeError("Secret Manager not available")
+        if "secret_version_name" in auth:
+            if not secret_manager_client:
+                raise RuntimeError("Secret Manager not available")
+            try:
+                name = auth["secret_version_name"]
+                response = secret_manager_client.access_secret_version(request={"name": name})
+                token = response.payload.data.decode("utf-8")
+                return {"refresh_token": token}
+            except NotFound:
+                raise FileNotFoundError(f"Secret version not found: {auth['secret_version_name']}")
+    
+    # Try to get OAuth credentials from context
+    if ctx:
         try:
-            name = auth["secret_version_name"]
-            response = secret_manager_client.access_secret_version(request={"name": name})
-            token = response.payload.data.decode("utf-8")
-            return {"refresh_token": token}
-        except NotFound:
-            raise FileNotFoundError(f"Secret version not found: {auth['secret_version_name']}")
-
+            return _get_auth_from_context(ctx)
+        except Exception as e:
+            logger.warning(f"Failed to get auth from context: {e}")
+    
     raise ValueError(
-        "auth must include one of: refresh_token | access_token | secret_version_name"
+        "Authentication required. "
+        "Connect via Claude Desktop OAuth or provide auth parameter: "
+        "{'refresh_token': '...'} | {'access_token': '...'} | {'secret_version_name': '...'}"
     )
 
 def _normalize_accounts(accounts: List) -> List[Dict]:
@@ -154,21 +190,21 @@ def _normalize_accounts(accounts: List) -> List[Dict]:
 # MCP Tools
 # --------------------------------------------------------------------
 @mcp.tool
-def list_accessible_accounts(auth: dict) -> List[Dict]:
+def list_accessible_accounts(ctx: Context, auth: Optional[dict] = None) -> List[Dict]:
     """
     List all Google Ads accounts the authenticated user can access.
 
-    Args:
-        auth: Authentication credentials. Can be one of:
-            - {"refresh_token": "..."} 
-            - {"access_token": "..."}
-            - {"secret_version_name": "projects/<id>/secrets/<name>/versions/<n|latest>"}
+    When connected via Claude Desktop OAuth, authentication is automatic.
+    For manual testing, provide auth parameter:
+        - {"refresh_token": "..."} 
+        - {"access_token": "..."}
+        - {"secret_version_name": "projects/<id>/secrets/<name>/versions/<n|latest>"}
     
     Returns:
         List of account objects with id, name, is_manager, currency, timezone
     """
     try:
-        creds = _resolve_creds(auth)
+        creds = _resolve_creds(auth=auth, ctx=ctx)
         service = GoogleAdsService(user_credentials=creds)
         accounts = service.get_accessible_accounts()
         return _normalize_accounts(accounts)
@@ -177,20 +213,20 @@ def list_accessible_accounts(auth: dict) -> List[Dict]:
 
 
 @mcp.tool
-def get_account_summary(auth: dict, customer_id: str, days: int = 30) -> Dict:
+def get_account_summary(ctx: Context, customer_id: str, days: int = 30, auth: Optional[dict] = None) -> Dict:
     """
     Get performance summary (spend, clicks, conversions) for a Google Ads account.
 
     Args:
-        auth: Authentication credentials (same format as list_accessible_accounts)
         customer_id: Google Ads customer ID (with or without dashes)
         days: Lookback window in days (default: 30)
+        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     
     Returns:
         Dictionary with account performance metrics
     """
     try:
-        creds = _resolve_creds(auth)
+        creds = _resolve_creds(auth=auth, ctx=ctx)
         service = GoogleAdsService(user_credentials=creds)
         summary = service.get_account_summary(customer_id, days)
         return summary or {"message": f"No data found for account {customer_id}"}
@@ -199,18 +235,18 @@ def get_account_summary(auth: dict, customer_id: str, days: int = 30) -> Dict:
 
 
 @mcp.tool
-def get_campaigns(auth: dict, customer_id: str, days: int = 30, limit: int = 100) -> List[Dict]:
+def get_campaigns(ctx: Context, customer_id: str, days: int = 30, limit: int = 100, auth: Optional[dict] = None) -> List[Dict]:
     """
     Get campaigns for a specific Google Ads account.
 
     Args:
-        auth: Authentication credentials
         customer_id: Google Ads customer ID
         days: Lookback window in days (default: 30)
         limit: Maximum number of campaigns to return (default: 100)
+        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     """
     try:
-        creds = _resolve_creds(auth)
+        creds = _resolve_creds(auth=auth, ctx=ctx)
         service = GoogleAdsService(user_credentials=creds)
         campaigns = service.get_campaigns(customer_id, days, limit)
         return _normalize_accounts(campaigns)
@@ -220,24 +256,25 @@ def get_campaigns(auth: dict, customer_id: str, days: int = 30, limit: int = 100
 
 @mcp.tool
 def get_keywords(
-    auth: dict,
+    ctx: Context,
     customer_id: str,
     campaign_id: Optional[str] = None,
     days: int = 30,
-    limit: int = 100
+    limit: int = 100,
+    auth: Optional[dict] = None
 ) -> List[Dict]:
     """
     Get keywords for a specific Google Ads account.
 
     Args:
-        auth: Authentication credentials
         customer_id: Google Ads customer ID
         campaign_id: Optional campaign ID to filter by
         days: Lookback window in days (default: 30)
         limit: Maximum number of keywords to return (default: 100)
+        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     """
     try:
-        creds = _resolve_creds(auth)
+        creds = _resolve_creds(auth=auth, ctx=ctx)
         service = GoogleAdsService(user_credentials=creds)
         keywords = service.get_keywords(customer_id, campaign_id, days, limit)
         return _normalize_accounts(keywords)
