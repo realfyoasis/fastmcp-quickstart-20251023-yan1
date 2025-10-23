@@ -1,32 +1,70 @@
-# Google Ads MCP Server - Multi-User OAuth Setup
+# FastMCP Cloud OAuth Setup - FIXED!
 
-This MCP server implements **proper multi-user OAuth authentication** for Google Ads API access. Each user authenticates separately with their own Google account and can only access their own data.
+## ✅ Issue Fixed!
 
-## 🔐 How Multi-User Authentication Works
+The error **"cannot import name 'GoogleProvider'"** was caused by trying to import a class that doesn't exist in the current FastMCP version.
 
-### The Flow for Each User:
+**FastMCP Cloud uses environment-based OAuth configuration instead.**
 
-1. **User A connects to your FastMCP server in Claude**
-2. **User A clicks "authenticate" or uses a tool**
-3. **FastMCP redirects User A to Google OAuth** (`/auth/login`)
-4. **User A signs in with their Google account**
-5. **Google redirects back with User A's tokens**
-6. **FastMCP stores User A's session** (cookies/JWT)
-7. **User A's tools use ONLY their tokens**
+---
 
-8. **User B connects separately**
-9. **User B goes through their own OAuth flow**
-10. **User B gets their own session with their own tokens**
-11. **User B sees ONLY their Google Ads accounts**
+## 🔧 Environment Variables for OAuth
 
-### Key Points:
-- ✅ Each user has a **separate authenticated session**
-- ✅ FastMCP's `AuthenticatedContext` contains the **current user's tokens**
-- ✅ Tools receive `context` parameter with the **calling user's credentials**
-- ✅ No shared token file - each user's tokens are **session-isolated**
-- ✅ User A cannot see User B's data
+FastMCP Cloud automatically configures OAuth when you set these environment variables:
 
-## 🚀 Setup Instructions
+```bash
+# Required for OAuth
+FASTMCP_SERVER_AUTH=google
+GOOGLE_OAUTH_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-your-secret
+RENDER_EXTERNAL_URL=https://your-app.fastmcp.app
+
+# Required for Google Ads API
+GOOGLE_ADS_DEVELOPER_TOKEN=your-developer-token
+```
+
+---
+
+## 📋 Setup Steps
+
+### 1. Set Environment Variables in FastMCP Cloud
+
+When deploying, add these environment variables:
+
+```bash
+FASTMCP_SERVER_AUTH=google
+GOOGLE_OAUTH_CLIENT_ID=123456789-abc.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-your_secret_here
+GOOGLE_ADS_DEVELOPER_TOKEN=your_developer_token
+RENDER_EXTERNAL_URL=https://digital-magenta-bee.fastmcp.app
+```
+
+### 2. Configure Google Cloud OAuth
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Navigate to **APIs & Services > Credentials**
+3. Edit your OAuth 2.0 Client ID
+4. Add authorized redirect URI:
+   ```
+   https://digital-magenta-bee.fastmcp.app/auth/callback
+   ```
+5. Add required scopes:
+   - `https://www.googleapis.com/auth/adwords`
+   - `openid`
+   - `email`
+   - `profile`
+
+### 3. Deploy
+
+```bash
+# Push to git
+git add .
+git commit -m "Fix OAuth configuration"
+git push
+
+# Or use FastMCP CLI
+fastmcp deploy
+```
 
 ### 1. Google Cloud Console Setup
 

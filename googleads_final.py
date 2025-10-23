@@ -1,6 +1,6 @@
 """
-Google Ads MCP Server with FastMCP Built-in OAuth Authentication
-Uses FastMCP's GoogleProvider for zero-configuration OAuth setup.
+Google Ads MCP Server with FastMCP Cloud OAuth Authentication
+Automatically detects OAuth configuration from environment variables.
 """
 
 import os
@@ -9,7 +9,6 @@ from typing import List, Dict, Optional
 from dataclasses import is_dataclass, asdict
 
 from fastmcp import FastMCP, Context
-from fastmcp.server.auth import GoogleProvider
 
 try:
     from core.services.google_ads_service import GoogleAdsService
@@ -21,33 +20,14 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------
-# FastMCP Authentication Setup (Enterprise-Grade OAuth)
-# --------------------------------------------------------------------
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
-BASE_URL = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:7070"
+# FastMCP Cloud automatically detects OAuth configuration from these env vars:
+# - FASTMCP_SERVER_AUTH (e.g., "google")
+# - GOOGLE_OAUTH_CLIENT_ID
+# - GOOGLE_OAUTH_CLIENT_SECRET
+# - RENDER_EXTERNAL_URL (or FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL)
 
-# Initialize GoogleProvider with required scopes for Google Ads API
-auth = None
-if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
-    auth = GoogleProvider(
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        base_url=BASE_URL.rstrip("/"),
-        scopes=[
-            "https://www.googleapis.com/auth/adwords",
-            "openid",
-            "email",
-            "profile"
-        ]
-    )
-    logger.info("✅ FastMCP GoogleProvider initialized - OAuth enabled")
-else:
-    logger.warning("⚠️ Missing OAuth credentials - server will run without authentication")
-
-# Create FastMCP server with authentication
-mcp = FastMCP("Google Ads MCP", auth=auth)
+# Create FastMCP server (OAuth auto-configured via environment)
+mcp = FastMCP("Google Ads MCP")
 
 # --------------------------------------------------------------------
 # Helper Functions
@@ -55,7 +35,7 @@ mcp = FastMCP("Google Ads MCP", auth=auth)
 def _get_user_credentials_from_context(ctx: Context) -> dict:
     """
     Extract OAuth credentials from FastMCP's authenticated context.
-    FastMCP GoogleProvider automatically injects user credentials after OAuth flow.
+    FastMCP Cloud automatically injects user credentials after OAuth flow.
     """
     # FastMCP auth providers inject authenticated user into context
     if not ctx or not hasattr(ctx, 'user') or not ctx.user:
@@ -66,7 +46,7 @@ def _get_user_credentials_from_context(ctx: Context) -> dict:
     
     user = ctx.user
     
-    # FastMCP GoogleProvider stores tokens in user object
+    # FastMCP stores tokens in user object
     access_token = None
     refresh_token = None
     
@@ -81,7 +61,7 @@ def _get_user_credentials_from_context(ctx: Context) -> dict:
     if not access_token and not refresh_token:
         raise RuntimeError(
             "No OAuth tokens found in authenticated context. "
-            "Ensure GoogleProvider is configured with correct scopes."
+            "Ensure OAuth is configured with correct scopes."
         )
     
     # Build credentials dict for GoogleAdsService
@@ -95,10 +75,13 @@ def _get_user_credentials_from_context(ctx: Context) -> dict:
         credentials["refresh_token"] = refresh_token
     
     # Add OAuth client credentials for token refresh
-    if GOOGLE_CLIENT_ID:
-        credentials["client_id"] = GOOGLE_CLIENT_ID
-    if GOOGLE_CLIENT_SECRET:
-        credentials["client_secret"] = GOOGLE_CLIENT_SECRET
+    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+    
+    if client_id:
+        credentials["client_id"] = client_id
+    if client_secret:
+        credentials["client_secret"] = client_secret
     
     if not credentials["developer_token"]:
         raise ValueError(
