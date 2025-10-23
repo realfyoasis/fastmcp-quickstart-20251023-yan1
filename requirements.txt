@@ -1,3 +1,4 @@
 fastmcp
 google-ads
 google-cloud-secret-manager
+python-dotenv
