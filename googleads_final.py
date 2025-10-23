@@ -1,6 +1,6 @@
 """
-Google Ads MCP Server with FastMCP Cloud OAuth Auto-Discovery
-Credentials are automatically injected by FastMCP - no manual auth parameter needed!
+Google Ads MCP Server with FastMCP Built-in OAuth Authentication
+Uses FastMCP's GoogleProvider for zero-configuration OAuth setup.
 """
 
 import os
@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 from dataclasses import is_dataclass, asdict
 
 from fastmcp import FastMCP, Context
+from fastmcp.server.auth import GoogleProvider
 
 try:
     from core.services.google_ads_service import GoogleAdsService
@@ -20,8 +21,33 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create FastMCP server
-mcp = FastMCP("Google Ads MCP")
+# --------------------------------------------------------------------
+# FastMCP Authentication Setup (Enterprise-Grade OAuth)
+# --------------------------------------------------------------------
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+BASE_URL = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:7070"
+
+# Initialize GoogleProvider with required scopes for Google Ads API
+auth = None
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+    auth = GoogleProvider(
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        base_url=BASE_URL.rstrip("/"),
+        scopes=[
+            "https://www.googleapis.com/auth/adwords",
+            "openid",
+            "email",
+            "profile"
+        ]
+    )
+    logger.info("✅ FastMCP GoogleProvider initialized - OAuth enabled")
+else:
+    logger.warning("⚠️ Missing OAuth credentials - server will run without authentication")
+
+# Create FastMCP server with authentication
+mcp = FastMCP("Google Ads MCP", auth=auth)
 
 # --------------------------------------------------------------------
 # Helper Functions
@@ -29,38 +55,56 @@ mcp = FastMCP("Google Ads MCP")
 def _get_user_credentials_from_context(ctx: Context) -> dict:
     """
     Extract OAuth credentials from FastMCP's authenticated context.
-    FastMCP Cloud automatically injects these after OAuth flow.
+    FastMCP GoogleProvider automatically injects user credentials after OAuth flow.
     """
-    # FastMCP injects user info into context after OAuth
-    if not hasattr(ctx, 'user') or not ctx.user:
+    # FastMCP auth providers inject authenticated user into context
+    if not ctx or not hasattr(ctx, 'user') or not ctx.user:
         raise RuntimeError(
-            "Not authenticated. Please connect via Claude Desktop OAuth flow. "
-            "Your FastMCP server should be configured with Google OAuth provider."
+            "Not authenticated. Please authenticate via OAuth flow. "
+            "Client usage: Client('https://your-server.com/mcp', auth='oauth')"
         )
     
     user = ctx.user
     
-    # Extract tokens from user object
-    access_token = getattr(user, 'access_token', None) or (user.get('access_token') if isinstance(user, dict) else None)
-    refresh_token = getattr(user, 'refresh_token', None) or (user.get('refresh_token') if isinstance(user, dict) else None)
+    # FastMCP GoogleProvider stores tokens in user object
+    access_token = None
+    refresh_token = None
+    
+    # Try different attribute access patterns
+    if isinstance(user, dict):
+        access_token = user.get('access_token')
+        refresh_token = user.get('refresh_token')
+    else:
+        access_token = getattr(user, 'access_token', None)
+        refresh_token = getattr(user, 'refresh_token', None)
     
     if not access_token and not refresh_token:
         raise RuntimeError(
-            "No OAuth tokens found in context. "
-            "Ensure FASTMCP_SERVER_AUTH is configured correctly."
+            "No OAuth tokens found in authenticated context. "
+            "Ensure GoogleProvider is configured with correct scopes."
         )
     
     # Build credentials dict for GoogleAdsService
     credentials = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "client_id": os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
-        "client_secret": os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
         "developer_token": os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN"),
     }
     
+    if access_token:
+        credentials["access_token"] = access_token
+    if refresh_token:
+        credentials["refresh_token"] = refresh_token
+    
+    # Add OAuth client credentials for token refresh
+    if GOOGLE_CLIENT_ID:
+        credentials["client_id"] = GOOGLE_CLIENT_ID
+    if GOOGLE_CLIENT_SECRET:
+        credentials["client_secret"] = GOOGLE_CLIENT_SECRET
+    
     if not credentials["developer_token"]:
-        raise ValueError("GOOGLE_ADS_DEVELOPER_TOKEN environment variable is required")
+        raise ValueError(
+            "GOOGLE_ADS_DEVELOPER_TOKEN environment variable is required. "
+            "Get it from: https://ads.google.com/aw/apicenter"
+        )
     
     return credentials
 
@@ -201,38 +245,75 @@ def get_keywords(
 @mcp.resource("google-ads://help")
 def help_resource() -> str:
     return """
-Google Ads MCP Server - OAuth Auto-Authentication
+Google Ads MCP Server - FastMCP Built-in OAuth Authentication
 
-AUTHENTICATION:
-✅ Automatic via Claude Desktop OAuth flow
-✅ No manual credentials needed
-✅ Each user's data is automatically isolated
+AUTHENTICATION - Enterprise-Grade, Zero Configuration:
+✅ FastMCP GoogleProvider with automatic browser-based OAuth
+✅ Token refresh and persistent storage handled automatically
+✅ Production-ready security with comprehensive error handling
 
-HOW IT WORKS:
-1. Add this server to Claude Desktop (remote MCP)
-2. Claude detects OAuth configuration
-3. Click "Connect" button
-4. Sign in with Google
-5. Tools automatically use your credentials
+CONNECTING FROM CLAUDE DESKTOP:
+Add to your Claude Desktop configuration:
 
-TOOLS:
+{
+  "mcpServers": {
+    "google-ads": {
+      "url": "https://your-server.fastmcp.app/mcp",
+      "auth": "oauth"
+    }
+  }
+}
+
+That's it! Claude will automatically:
+1. Launch browser for Google OAuth
+2. Store tokens securely
+3. Refresh tokens when needed
+4. Handle all authentication flows
+
+CONNECTING FROM PYTHON CLIENT:
+```python
+from fastmcp import Client
+
+async with Client("https://your-server.fastmcp.app/mcp", auth="oauth") as client:
+    # Automatic browser-based OAuth flow on first connection
+    accounts = await client.call_tool("list_accessible_accounts")
+    print(accounts)
+```
+
+TOOLS AVAILABLE:
 • list_accessible_accounts() - List your Google Ads accounts
 • get_account_summary(customer_id, days=30) - Get account performance
 • get_campaigns(customer_id, days=30, limit=100) - Get campaigns
 • get_keywords(customer_id, campaign_id?, days=30, limit=100) - Get keywords
 
-DEPLOYMENT (FastMCP Cloud):
-Set these environment variables:
-- FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider
-- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=<your_oauth_client_id>
-- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=<your_oauth_client_secret>
-- FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL=<your_fastmcp_url>
+DEPLOYMENT ENVIRONMENT VARIABLES:
+Required:
+- GOOGLE_OAUTH_CLIENT_ID=<your_oauth_client_id>
+- GOOGLE_OAUTH_CLIENT_SECRET=<your_oauth_client_secret>
 - GOOGLE_ADS_DEVELOPER_TOKEN=<your_developer_token>
+- RENDER_EXTERNAL_URL=https://your-server.fastmcp.app
 
-GOOGLE CLOUD SETUP:
-- Create OAuth 2.0 Client ID
-- Add redirect URI: <base_url>/auth/callback
-- Add scope: https://www.googleapis.com/auth/adwords
+GOOGLE CLOUD CONSOLE SETUP:
+1. Create OAuth 2.0 Client ID (Web application)
+2. Add authorized redirect URI:
+   https://your-server.fastmcp.app/auth/callback
+3. Enable Google Ads API
+4. Add required scopes:
+   - https://www.googleapis.com/auth/adwords
+   - openid
+   - email
+   - profile
+
+WHY FASTMCP AUTH IS BETTER:
+✓ Zero-config OAuth - just pass auth="oauth"
+✓ Automatic token refresh
+✓ Persistent credential storage
+✓ Browser-based flow with local callback server
+✓ Enterprise-ready security
+✓ Full OIDC support
+✓ Works with any OAuth provider
+
+Get your Developer Token: https://ads.google.com/aw/apicenter
 """
 
 
