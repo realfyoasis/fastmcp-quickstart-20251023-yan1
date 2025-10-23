@@ -292,19 +292,22 @@ Google Cloud Console Setup:
 # Run Server with OAuth Discovery
 # ============================================================================
 if __name__ == "__main__":
-    import asyncio
+    import uvicorn
     
     port = int(os.getenv("PORT", "7070"))
     host = os.getenv("HOST", "0.0.0.0")
     
-    # Get HTTP app and add OAuth routes for auto-discovery
+    # Get HTTP app from FastMCP
     app = mcp.http_app()
     
     if oauth:
-        # Add OAuth routes - Claude will discover them at /.well-known/oauth-authorization-server
-        for route in oauth.get_routes(mcp_path="/"):
+        # Add OAuth routes for Claude's auto-discovery
+        # This adds /.well-known/oauth-authorization-server endpoint
+        for route in oauth.get_routes(mcp_path="/mcp"):
             app.router.routes.append(route)
-        logger.info("✅ OAuth discovery routes added")
+        logger.info("✅ OAuth discovery routes added to FastMCP app")
+    else:
+        logger.warning("⚠️  OAuth not configured - Claude connect button will not work")
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -313,22 +316,24 @@ if __name__ == "__main__":
 
 Server URL: http://{host}:{port}
 MCP Endpoint: http://{host}:{port}/mcp
+OAuth Discovery: http://{host}:{port}/.well-known/oauth-authorization-server
 
-OAuth Discovery: {'✅ ENABLED' if oauth else '❌ Disabled'}
+OAuth Status: {'✅ ENABLED' if oauth else '❌ Disabled'}
   
-When OAuth is enabled:
+How it works:
   1. Deploy to FastMCP Cloud
-  2. Add server URL to Claude Desktop
-  3. Claude auto-discovers OAuth config
-  4. User clicks "Connect" → OAuth starts automatically
+  2. Claude Desktop reads /.well-known/oauth-authorization-server
+  3. Claude shows "Connect" button automatically
+  4. User clicks "Connect" → OAuth flow starts
   5. No manual JSON configuration needed!
 
-Environment Status:
-  GOOGLE_OAUTH_CLIENT_ID: {'✅' if GOOGLE_OAUTH_CLIENT_ID else '❌ Missing'}
-  GOOGLE_OAUTH_CLIENT_SECRET: {'✅' if GOOGLE_OAUTH_CLIENT_SECRET else '❌ Missing'}
-  GOOGLE_ADS_DEVELOPER_TOKEN: {'✅' if os.getenv('GOOGLE_ADS_DEVELOPER_TOKEN') else '❌ Missing'}
+Environment Variables:
+  GOOGLE_OAUTH_CLIENT_ID: {'✅ Set' if GOOGLE_OAUTH_CLIENT_ID else '❌ Missing'}
+  GOOGLE_OAUTH_CLIENT_SECRET: {'✅ Set' if GOOGLE_OAUTH_CLIENT_SECRET else '❌ Missing'}
+  GOOGLE_ADS_DEVELOPER_TOKEN: {'✅ Set' if os.getenv('GOOGLE_ADS_DEVELOPER_TOKEN') else '❌ Missing'}
 
 Press Ctrl+C to stop
 """)
     
-    asyncio.run(mcp.run_http_async(host=host, port=port))
+    # Run with uvicorn directly (like your original mcp_server.py)
+    uvicorn.run(app, host=host, port=port)
