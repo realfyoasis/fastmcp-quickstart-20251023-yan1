@@ -13,11 +13,14 @@ def echo_tool(text: str) -> str:
     """Echo the input text"""
     return text
 
+@mcp.tool
+def reverse_tool(text: str) -> str:
+    """Reverse the input text"""
+    return text[::-1]
 
 @mcp.resource("echo://static")
 def echo_resource() -> str:
     return "Echo!"
-
 
 @mcp.resource("echo://{text}")
 def echo_template(text: str) -> str:
