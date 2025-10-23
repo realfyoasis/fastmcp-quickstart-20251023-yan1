@@ -207,7 +207,7 @@ def summary_template(customer_id: str) -> str:
 # Prompt (optional, same style as echo prompt)
 # --------------------------------------------------------------------
 @mcp.prompt("ads_instructions")
-def ads_instructions(text: str = "Provide Google Ads auth and optional customer_id/days.") -> str:
+def ads_instructions(text: str = "Provide Google Ads auth and optional customer_id/days.optionally where applicable make graphs.") -> str:
     return text
 
 
