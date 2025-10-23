@@ -1,14 +1,24 @@
 """
-Google Ads MCP Server with FastMCP Cloud OAuth Authentication
-Automatically detects OAuth configuration from environment variables.
+Google Ads MCP Server with OAuthProxy for Automatic OAuth Flow
+Based on working pattern - shows OAuth screen automatically.
 """
 
 import os
 import logging
 from typing import List, Dict, Optional
 from dataclasses import is_dataclass, asdict
+from types import SimpleNamespace
 
 from fastmcp import FastMCP, Context
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+try:
+    from fastmcp.server.auth.oauth_proxy import OAuthProxy
+except ImportError:
+    OAuthProxy = None
+    logger.warning("OAuthProxy not available in this FastMCP version")
 
 try:
     from core.services.google_ads_service import GoogleAdsService
@@ -17,16 +27,70 @@ except ImportError:
         def __init__(self, user_credentials: dict):
             raise RuntimeError("Missing core/services/google_ads_service.py")
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# OAuth Configuration
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
 
-# FastMCP Cloud automatically detects OAuth configuration from these env vars:
-# - FASTMCP_SERVER_AUTH (e.g., "google")
-# - GOOGLE_OAUTH_CLIENT_ID
-# - GOOGLE_OAUTH_CLIENT_SECRET
-# - RENDER_EXTERNAL_URL (or FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL)
+# Build OAuthProxy if credentials available
+oauth = None
+if GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET and OAuthProxy:
+    def build_oauth_proxy():
+        auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        token_url = "https://oauth2.googleapis.com/token"
+        scopes = [
+            "https://www.googleapis.com/auth/adwords",
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]
+        
+        Verifier = SimpleNamespace(
+            verify=lambda *_args, **_kw: True,
+            required_scopes=scopes
+        )
+        
+        public_base = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:7070").rstrip("/")
+        
+        # Try different parameter combinations for compatibility
+        attempts = [
+            dict(
+                upstream_authorization_endpoint=auth_url,
+                upstream_token_endpoint=token_url,
+                upstream_client_id=GOOGLE_OAUTH_CLIENT_ID,
+                upstream_client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+                base_url=public_base,
+                token_verifier=Verifier,
+                default_scopes=scopes,
+            ),
+            dict(
+                upstream_authorization_endpoint=auth_url,
+                upstream_token_endpoint=token_url,
+                client_id=GOOGLE_OAUTH_CLIENT_ID,
+                client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+                default_scopes=scopes,
+            ),
+        ]
+        
+        last_exc = None
+        for kwargs in attempts:
+            try:
+                return OAuthProxy(**kwargs)
+            except TypeError as e:
+                last_exc = e
+                continue
+        
+        raise RuntimeError(f"Could not construct OAuthProxy: {last_exc}")
+    
+    try:
+        oauth = build_oauth_proxy()
+        logger.info("✅ OAuthProxy initialized - OAuth flow will work")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize OAuthProxy: {e}")
+        oauth = None
+else:
+    logger.warning("⚠️ OAuth not configured - missing credentials or OAuthProxy")
 
-# Create FastMCP server (OAuth auto-configured via environment)
+# Create FastMCP server
 mcp = FastMCP("Google Ads MCP")
 
 # --------------------------------------------------------------------
@@ -301,15 +365,30 @@ Get your Developer Token: https://ads.google.com/aw/apicenter
 
 
 # ============================================================================
-# Run
+# Run with OAuth Support
 # ============================================================================
 if __name__ == "__main__":
-    import asyncio
+    import uvicorn
     
     port = int(os.getenv("PORT", "7070"))
     host = os.getenv("HOST", "0.0.0.0")
     
-    logger.info("Starting Google Ads MCP Server with FastMCP Cloud OAuth")
-    logger.info(f"Server URL: http://{host}:{port}")
+    # Get FastMCP's HTTP app
+    app = mcp.http_app()
     
-    asyncio.run(mcp.run_http_async(host=host, port=port))
+    # Add OAuth routes if available
+    if oauth:
+        logger.info("✅ Adding OAuth routes to FastMCP app")
+        for route in oauth.get_routes(mcp_path="/mcp"):
+            app.router.routes.append(route)
+        logger.info("✅ OAuth endpoints available:")
+        logger.info("   - GET /.well-known/oauth-authorization-server")
+        logger.info("   - GET /oauth/login")
+        logger.info("   - GET /oauth/callback")
+    else:
+        logger.warning("⚠️ OAuth not configured - auth screen will not work")
+    
+    logger.info(f"🚀 Server starting at http://{host}:{port}")
+    logger.info(f"📡 MCP endpoint: http://{host}:{port}/mcp")
+    
+    uvicorn.run(app, host=host, port=port)
