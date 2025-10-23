@@ -1,23 +1,23 @@
 """
-Google Ads MCP Server (echo-style, no FastAPI)
+Google Ads MCP Server with OAuthProxy for Claude Desktop
+Uses FastMCP's OAuthProxy for automatic OAuth discovery and token handling.
 """
 
-from fastmcp import FastMCP
+import os
+import logging
 from typing import List, Dict
 from dataclasses import is_dataclass, asdict
+from types import SimpleNamespace
 
-# --- Optional GCP Secret Manager (only if you want to resolve secret_version_name) ---
+from fastmcp import FastMCP
+from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from google.cloud import secretmanager
 from google.api_core.exceptions import NotFound
 
-# --- Your Google Ads service (you must provide this file/class) ---
-# Expecting: core/services/google_ads_service.py with class GoogleAdsService(user_credentials: dict)
-# and methods: get_accessible_accounts() -> Iterable[object], get_account_summary(customer_id: str, days: int) -> dict
 try:
     from core.services.google_ads_service import GoogleAdsService
-except Exception as e:  # pragma: no cover
-    # Lightweight guard so the module imports even if the service isn't present yet
-    class GoogleAdsService:  # type: ignore
+except Exception as e:
+    class GoogleAdsService:
         def __init__(self, user_credentials: dict):
             raise RuntimeError(
                 "Missing core/services/google_ads_service.py. "
@@ -25,8 +25,56 @@ except Exception as e:  # pragma: no cover
                 "get_accessible_accounts() and get_account_summary(customer_id, days)."
             )
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # --------------------------------------------------------------------
-# Create server (same shape as your echo.py)
+# OAuth Proxy Setup (for Claude's automatic OAuth discovery)
+# --------------------------------------------------------------------
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("GOOGLE_ADS_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("GOOGLE_ADS_CLIENT_SECRET")
+
+if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
+    logger.warning("⚠️  Missing GOOGLE_OAUTH_CLIENT_ID/SECRET - OAuth will be disabled")
+    oauth = None
+else:
+    def build_oauth_proxy():
+        """Build OAuthProxy for Google OAuth with Google Ads scope"""
+        from fastmcp.server.auth import StaticTokenVerifier
+        
+        auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        token_url = "https://oauth2.googleapis.com/token"
+        scopes = [
+            "https://www.googleapis.com/auth/adwords",
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]
+        
+        # Token verifier (FastMCP requires this)
+        verifier = StaticTokenVerifier(secret="dummy", required_scopes=scopes)
+        
+        public_base = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "https://digital-magenta-bee.fastmcp.app"
+        public_base = public_base.rstrip("/")
+        
+        return OAuthProxy(
+            upstream_authorization_endpoint=auth_url,
+            upstream_token_endpoint=token_url,
+            upstream_client_id=GOOGLE_OAUTH_CLIENT_ID,
+            upstream_client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+            token_verifier=verifier,
+            base_url=public_base,
+        )
+    
+    try:
+        oauth = build_oauth_proxy()
+        logger.info("✅ OAuthProxy initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize OAuthProxy: {e}")
+        oauth = None
+
+# --------------------------------------------------------------------
+# Create FastMCP server
 # --------------------------------------------------------------------
 mcp = FastMCP("Google Ads MCP")
 
@@ -163,10 +211,43 @@ def ads_instructions(text: str = "Provide Google Ads auth and optional customer_
     return text
 
 
-# --------------------------------------------------------------------
-# Run (HTTP for Claude custom HTTP connector; mirrors tiny style)
-# --------------------------------------------------------------------
+# ============================================================================
+# Run (HTTP with OAuth discovery)
+# ============================================================================
 if __name__ == "__main__":
-    import asyncio, os
-    # Serve pure FastMCP HTTP (root path) so you can point Claude at http://host:7070/
-    asyncio.run(mcp.run_http_async(host="0.0.0.0", port=int(os.getenv("PORT", "7070"))))
+    import asyncio
+    
+    port = int(os.getenv("PORT", "7070"))
+    host = os.getenv("HOST", "0.0.0.0")
+    
+    # Get the HTTP app and add OAuth routes
+    app = mcp.http_app()
+    
+    if oauth:
+        # Add OAuth routes for discovery
+        for route in oauth.get_routes(mcp_path="/"):
+            app.router.routes.append(route)
+        logger.info("✅ OAuth routes added - Claude will auto-discover OAuth config")
+    
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  Google Ads MCP Server with OAuth Discovery                 ║
+╚══════════════════════════════════════════════════════════════╝
+
+Server URL: http://{host}:{port}
+MCP Endpoint: http://{host}:{port}/mcp
+
+OAuth Discovery: {'✅ Enabled' if oauth else '❌ Disabled (missing credentials)'}
+  - Claude will find OAuth config at /.well-known/oauth-authorization-server
+  - User clicks "Connect" → OAuth flow starts automatically
+  - No manual configuration needed!
+
+Environment Variables:
+  GOOGLE_OAUTH_CLIENT_ID: {'✅ Set' if GOOGLE_OAUTH_CLIENT_ID else '❌ Missing'}
+  GOOGLE_OAUTH_CLIENT_SECRET: {'✅ Set' if GOOGLE_OAUTH_CLIENT_SECRET else '❌ Missing'}
+  GOOGLE_ADS_DEVELOPER_TOKEN: {'✅ Set' if os.getenv('GOOGLE_ADS_DEVELOPER_TOKEN') else '❌ Missing'}
+
+Press Ctrl+C to stop
+""")
+    
+    asyncio.run(mcp.run_http_async(host=host, port=port))
