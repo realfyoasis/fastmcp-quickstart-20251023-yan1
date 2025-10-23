@@ -1,4 +1,6 @@
 fastmcp
+fastapi
+uvicorn
 google-ads
 google-cloud-secret-manager
 python-dotenv
