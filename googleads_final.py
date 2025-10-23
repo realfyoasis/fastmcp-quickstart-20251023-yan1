@@ -1,160 +1,69 @@
 """
-Google Ads MCP Server with OAuthProxy for Claude Desktop Auto-Discovery
-Based on working mcp_server.py pattern with OAuth discovery enabled.
-
-When deployed to FastMCP Cloud:
-- Claude Desktop will auto-discover OAuth configuration
-- User clicks "Connect" → OAuth flow starts automatically
-- No manual JSON configuration needed!
+Google Ads MCP Server with FastMCP Cloud OAuth Auto-Discovery
+Credentials are automatically injected by FastMCP - no manual auth parameter needed!
 """
 
 import os
 import logging
 from typing import List, Dict, Optional
 from dataclasses import is_dataclass, asdict
-from types import SimpleNamespace
 
 from fastmcp import FastMCP, Context
-from fastmcp.server.auth.oauth_proxy import OAuthProxy
-from google.cloud import secretmanager
-from google.api_core.exceptions import NotFound
 
 try:
     from core.services.google_ads_service import GoogleAdsService
-except Exception as e:
+except ImportError:
     class GoogleAdsService:
         def __init__(self, user_credentials: dict):
-            raise RuntimeError(
-                "Missing core/services/google_ads_service.py"
-            )
+            raise RuntimeError("Missing core/services/google_ads_service.py")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------
-# OAuth Configuration
-# --------------------------------------------------------------------
-GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or os.getenv("GOOGLE_ADS_CLIENT_ID")
-GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("GOOGLE_ADS_CLIENT_SECRET")
-secret_manager_client = None
-
-try:
-    secret_manager_client = secretmanager.SecretManagerServiceClient()
-except Exception:
-    logger.warning("Secret Manager not available - secret_version_name auth will not work")
-
-if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
-    logger.warning("⚠️  Missing GOOGLE_OAUTH_CLIENT_ID/SECRET - OAuth will be disabled")
-    oauth = None
-else:
-    def build_oauth_proxy():
-        """Build OAuthProxy with Google OAuth configuration"""
-        auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
-        token_url = "https://oauth2.googleapis.com/token"
-        scopes = [
-            "https://www.googleapis.com/auth/adwords",
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/userinfo.profile",
-        ]
-        
-        # Simple token verifier (using SimpleNamespace like your working code)
-        Verifier = SimpleNamespace(
-            verify=lambda *_args, **_kw: True,
-            required_scopes=scopes
-        )
-        
-        public_base = os.getenv("RENDER_EXTERNAL_URL") or "https://digital-magenta-bee.fastmcp.app"
-        public_base = public_base.rstrip("/")
-        
-        return OAuthProxy(
-            upstream_authorization_endpoint=auth_url,
-            upstream_token_endpoint=token_url,
-            upstream_client_id=GOOGLE_OAUTH_CLIENT_ID,
-            upstream_client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
-            token_verifier=Verifier,
-            base_url=public_base,
-        )
-    
-    try:
-        oauth = build_oauth_proxy()
-        logger.info("✅ OAuthProxy initialized - Claude will auto-discover OAuth config")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize OAuthProxy: {e}")
-        oauth = None
-
-# --------------------------------------------------------------------
-# Create FastMCP Server
-# --------------------------------------------------------------------
+# Create FastMCP server
 mcp = FastMCP("Google Ads MCP")
 
 # --------------------------------------------------------------------
 # Helper Functions
 # --------------------------------------------------------------------
-def _get_auth_from_context(ctx: Context) -> dict:
+def _get_user_credentials_from_context(ctx: Context) -> dict:
     """
-    Extract OAuth credentials from FastMCP Context.
-    When user connects via Claude Desktop OAuth, credentials are automatically
-    injected into the context.
+    Extract OAuth credentials from FastMCP's authenticated context.
+    FastMCP Cloud automatically injects these after OAuth flow.
     """
-    # Check if OAuth token is in context
-    if hasattr(ctx, 'access_token') and ctx.access_token:
-        return {"access_token": ctx.access_token}
+    # FastMCP injects user info into context after OAuth
+    if not hasattr(ctx, 'user') or not ctx.user:
+        raise RuntimeError(
+            "Not authenticated. Please connect via Claude Desktop OAuth flow. "
+            "Your FastMCP server should be configured with Google OAuth provider."
+        )
     
-    # Check meta/authorization for OAuth tokens
-    if hasattr(ctx, 'meta') and ctx.meta:
-        auth_header = ctx.meta.get('authorization') or ctx.meta.get('Authorization')
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header[7:]  # Remove 'Bearer ' prefix
-            return {"access_token": token}
+    user = ctx.user
     
-    # Fallback: no OAuth credentials found
-    # This happens when testing locally without OAuth
-    raise RuntimeError(
-        "No OAuth credentials found. "
-        "Please connect via Claude Desktop or provide auth parameter manually."
-    )
+    # Extract tokens from user object
+    access_token = getattr(user, 'access_token', None) or (user.get('access_token') if isinstance(user, dict) else None)
+    refresh_token = getattr(user, 'refresh_token', None) or (user.get('refresh_token') if isinstance(user, dict) else None)
+    
+    if not access_token and not refresh_token:
+        raise RuntimeError(
+            "No OAuth tokens found in context. "
+            "Ensure FASTMCP_SERVER_AUTH is configured correctly."
+        )
+    
+    # Build credentials dict for GoogleAdsService
+    credentials = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "client_id": os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+        "client_secret": os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+        "developer_token": os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN"),
+    }
+    
+    if not credentials["developer_token"]:
+        raise ValueError("GOOGLE_ADS_DEVELOPER_TOKEN environment variable is required")
+    
+    return credentials
 
-def _resolve_creds(auth: Optional[dict] = None, ctx: Optional[Context] = None) -> dict:
-    """
-    Resolve credentials from various auth formats.
-    Priority: explicit auth dict > OAuth from context > error
-    
-    Supports: 
-    - OAuth from Context (automatic when using Claude Desktop)
-    - refresh_token, access_token, secret_version_name (manual testing)
-    """
-    # If explicit auth provided, use it (for manual testing)
-    if auth and isinstance(auth, dict):
-        if "refresh_token" in auth:
-            return {"refresh_token": auth["refresh_token"]}
-
-        if "access_token" in auth:
-            return {"access_token": auth["access_token"]}
-
-        if "secret_version_name" in auth:
-            if not secret_manager_client:
-                raise RuntimeError("Secret Manager not available")
-            try:
-                name = auth["secret_version_name"]
-                response = secret_manager_client.access_secret_version(request={"name": name})
-                token = response.payload.data.decode("utf-8")
-                return {"refresh_token": token}
-            except NotFound:
-                raise FileNotFoundError(f"Secret version not found: {auth['secret_version_name']}")
-    
-    # Try to get OAuth credentials from context
-    if ctx:
-        try:
-            return _get_auth_from_context(ctx)
-        except Exception as e:
-            logger.warning(f"Failed to get auth from context: {e}")
-    
-    raise ValueError(
-        "Authentication required. "
-        "Connect via Claude Desktop OAuth or provide auth parameter: "
-        "{'refresh_token': '...'} | {'access_token': '...'} | {'secret_version_name': '...'}"
-    )
 
 def _normalize_accounts(accounts: List) -> List[Dict]:
     """Convert Account objects to plain dicts for JSON serialization."""
@@ -180,54 +89,59 @@ def _normalize_accounts(accounts: List) -> List[Dict]:
 
         try:
             out.append(dict(a))
-            continue
         except Exception:
             out.append({"raw": str(a)})
 
     return out
 
+
 # --------------------------------------------------------------------
-# MCP Tools
+# MCP Tools - Credentials automatically from OAuth context
 # --------------------------------------------------------------------
 @mcp.tool
-def list_accessible_accounts(ctx: Context, auth: Optional[dict] = None) -> List[Dict]:
+def list_accessible_accounts(ctx: Context) -> List[Dict]:
     """
-    List all Google Ads accounts the authenticated user can access.
-
-    When connected via Claude Desktop OAuth, authentication is automatic.
-    For manual testing, provide auth parameter:
-        - {"refresh_token": "..."} 
-        - {"access_token": "..."}
-        - {"secret_version_name": "projects/<id>/secrets/<name>/versions/<n|latest>"}
+    List all Google Ads accounts you can access.
+    
+    Authentication is handled automatically via OAuth.
+    No manual credentials needed!
     
     Returns:
         List of account objects with id, name, is_manager, currency, timezone
     """
     try:
-        creds = _resolve_creds(auth=auth, ctx=ctx)
-        service = GoogleAdsService(user_credentials=creds)
+        # Get credentials from authenticated context (injected by FastMCP OAuth)
+        credentials = _get_user_credentials_from_context(ctx)
+        
+        # Create service with user's OAuth credentials
+        service = GoogleAdsService(user_credentials=credentials)
+        
+        # Fetch accounts
         accounts = service.get_accessible_accounts()
+        
         return _normalize_accounts(accounts)
     except Exception as e:
         raise RuntimeError(f"Failed to list accounts: {str(e)}")
 
 
 @mcp.tool
-def get_account_summary(ctx: Context, customer_id: str, days: int = 30, auth: Optional[dict] = None) -> Dict:
+def get_account_summary(ctx: Context, customer_id: str, days: int = 30) -> Dict:
     """
-    Get performance summary (spend, clicks, conversions) for a Google Ads account.
-
+    Get performance summary for a Google Ads account.
+    
+    Authentication is handled automatically via OAuth.
+    
     Args:
         customer_id: Google Ads customer ID (with or without dashes)
         days: Lookback window in days (default: 30)
-        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     
     Returns:
         Dictionary with account performance metrics
     """
     try:
-        creds = _resolve_creds(auth=auth, ctx=ctx)
-        service = GoogleAdsService(user_credentials=creds)
+        credentials = _get_user_credentials_from_context(ctx)
+        service = GoogleAdsService(user_credentials=credentials)
+        
         summary = service.get_account_summary(customer_id, days)
         return summary or {"message": f"No data found for account {customer_id}"}
     except Exception as e:
@@ -235,19 +149,19 @@ def get_account_summary(ctx: Context, customer_id: str, days: int = 30, auth: Op
 
 
 @mcp.tool
-def get_campaigns(ctx: Context, customer_id: str, days: int = 30, limit: int = 100, auth: Optional[dict] = None) -> List[Dict]:
+def get_campaigns(ctx: Context, customer_id: str, days: int = 30, limit: int = 100) -> List[Dict]:
     """
     Get campaigns for a specific Google Ads account.
-
+    
     Args:
         customer_id: Google Ads customer ID
         days: Lookback window in days (default: 30)
         limit: Maximum number of campaigns to return (default: 100)
-        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     """
     try:
-        creds = _resolve_creds(auth=auth, ctx=ctx)
-        service = GoogleAdsService(user_credentials=creds)
+        credentials = _get_user_credentials_from_context(ctx)
+        service = GoogleAdsService(user_credentials=credentials)
+        
         campaigns = service.get_campaigns(customer_id, days, limit)
         return _normalize_accounts(campaigns)
     except Exception as e:
@@ -260,22 +174,21 @@ def get_keywords(
     customer_id: str,
     campaign_id: Optional[str] = None,
     days: int = 30,
-    limit: int = 100,
-    auth: Optional[dict] = None
+    limit: int = 100
 ) -> List[Dict]:
     """
     Get keywords for a specific Google Ads account.
-
+    
     Args:
         customer_id: Google Ads customer ID
         campaign_id: Optional campaign ID to filter by
         days: Lookback window in days (default: 30)
         limit: Maximum number of keywords to return (default: 100)
-        auth: Optional manual auth (for testing). Auto-filled when using Claude Desktop OAuth.
     """
     try:
-        creds = _resolve_creds(auth=auth, ctx=ctx)
-        service = GoogleAdsService(user_credentials=creds)
+        credentials = _get_user_credentials_from_context(ctx)
+        service = GoogleAdsService(user_credentials=credentials)
+        
         keywords = service.get_keywords(customer_id, campaign_id, days, limit)
         return _normalize_accounts(keywords)
     except Exception as e:
@@ -288,89 +201,51 @@ def get_keywords(
 @mcp.resource("google-ads://help")
 def help_resource() -> str:
     return """
-Google Ads MCP Server with OAuth Auto-Discovery
+Google Ads MCP Server - OAuth Auto-Authentication
 
-AUTHENTICATION - TWO WAYS:
+AUTHENTICATION:
+✅ Automatic via Claude Desktop OAuth flow
+✅ No manual credentials needed
+✅ Each user's data is automatically isolated
 
-Method 1: Claude Desktop Auto-OAuth (Recommended)
-  - Deploy to FastMCP Cloud
-  - Add server URL to Claude Desktop: https://digital-magenta-bee.fastmcp.app/mcp
-  - Claude automatically discovers OAuth config at /.well-known/oauth-authorization-server
-  - Click "Connect" button → OAuth flow starts automatically
-  - No manual JSON configuration needed!
-
-Method 2: Manual auth parameter (Testing)
-  - Pass auth in each tool call:
-    {"refresh_token": "..."} or
-    {"access_token": "..."} or
-    {"secret_version_name": "projects/<id>/secrets/<name>/versions/<version>"}
+HOW IT WORKS:
+1. Add this server to Claude Desktop (remote MCP)
+2. Claude detects OAuth configuration
+3. Click "Connect" button
+4. Sign in with Google
+5. Tools automatically use your credentials
 
 TOOLS:
-• list_accessible_accounts(auth) - List your Google Ads accounts
-• get_account_summary(auth, customer_id, days=30) - Get account performance
-• get_campaigns(auth, customer_id, days=30, limit=100) - Get campaigns
-• get_keywords(auth, customer_id, campaign_id?, days=30, limit=100) - Get keywords
+• list_accessible_accounts() - List your Google Ads accounts
+• get_account_summary(customer_id, days=30) - Get account performance
+• get_campaigns(customer_id, days=30, limit=100) - Get campaigns
+• get_keywords(customer_id, campaign_id?, days=30, limit=100) - Get keywords
 
-DEPLOYMENT:
-Set these environment variables in FastMCP Cloud:
-- GOOGLE_OAUTH_CLIENT_ID=<your_oauth_client_id>
-- GOOGLE_OAUTH_CLIENT_SECRET=<your_oauth_client_secret>
+DEPLOYMENT (FastMCP Cloud):
+Set these environment variables:
+- FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=<your_oauth_client_id>
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=<your_oauth_client_secret>
+- FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL=<your_fastmcp_url>
 - GOOGLE_ADS_DEVELOPER_TOKEN=<your_developer_token>
-- RENDER_EXTERNAL_URL=https://digital-magenta-bee.fastmcp.app
 
-Google Cloud Console Setup:
-- Add redirect URI: https://digital-magenta-bee.fastmcp.app/oauth/callback
-- Enable Google Ads API
+GOOGLE CLOUD SETUP:
+- Create OAuth 2.0 Client ID
+- Add redirect URI: <base_url>/auth/callback
 - Add scope: https://www.googleapis.com/auth/adwords
 """
 
 
 # ============================================================================
-# Run Server with OAuth Discovery
+# Run
 # ============================================================================
 if __name__ == "__main__":
-    import uvicorn
+    import asyncio
     
     port = int(os.getenv("PORT", "7070"))
     host = os.getenv("HOST", "0.0.0.0")
     
-    # Get HTTP app from FastMCP
-    app = mcp.http_app()
+    logger.info("Starting Google Ads MCP Server with FastMCP Cloud OAuth")
+    logger.info(f"Server URL: http://{host}:{port}")
     
-    if oauth:
-        # Add OAuth routes for Claude's auto-discovery
-        # This adds /.well-known/oauth-authorization-server endpoint
-        for route in oauth.get_routes(mcp_path="/mcp"):
-            app.router.routes.append(route)
-        logger.info("✅ OAuth discovery routes added to FastMCP app")
-    else:
-        logger.warning("⚠️  OAuth not configured - Claude connect button will not work")
-    
-    print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║  Google Ads MCP with OAuth Auto-Discovery for Claude        ║
-╚══════════════════════════════════════════════════════════════╝
-
-Server URL: http://{host}:{port}
-MCP Endpoint: http://{host}:{port}/mcp
-OAuth Discovery: http://{host}:{port}/.well-known/oauth-authorization-server
-
-OAuth Status: {'✅ ENABLED' if oauth else '❌ Disabled'}
-  
-How it works:
-  1. Deploy to FastMCP Cloud
-  2. Claude Desktop reads /.well-known/oauth-authorization-server
-  3. Claude shows "Connect" button automatically
-  4. User clicks "Connect" → OAuth flow starts
-  5. No manual JSON configuration needed!
-
-Environment Variables:
-  GOOGLE_OAUTH_CLIENT_ID: {'✅ Set' if GOOGLE_OAUTH_CLIENT_ID else '❌ Missing'}
-  GOOGLE_OAUTH_CLIENT_SECRET: {'✅ Set' if GOOGLE_OAUTH_CLIENT_SECRET else '❌ Missing'}
-  GOOGLE_ADS_DEVELOPER_TOKEN: {'✅ Set' if os.getenv('GOOGLE_ADS_DEVELOPER_TOKEN') else '❌ Missing'}
-
-Press Ctrl+C to stop
-""")
-    
-    # Run with uvicorn directly (like your original mcp_server.py)
-    uvicorn.run(app, host=host, port=port)
+    asyncio.run(mcp.run_http_async(host=host, port=port))
