@@ -4,6 +4,7 @@ Google Ads MCP Server (echo-style, no FastAPI)
 
 from fastmcp import FastMCP
 from typing import List, Dict
+from dataclasses import is_dataclass, asdict
 
 # --- Optional GCP Secret Manager (only if you want to resolve secret_version_name) ---
 from google.cloud import secretmanager
@@ -80,8 +81,38 @@ def list_accessible_accounts(auth: dict) -> List[Dict]:
     """
     svc = GoogleAdsService(user_credentials=_resolve_creds(auth))
     accounts = svc.get_accessible_accounts()
-    # normalize to plain dicts
-    return [getattr(a, "__dict__", dict(a)) for a in accounts]
+
+    out = []
+    for a in accounts:
+        # dataclass -> asdict
+        try:
+            if is_dataclass(a):
+                out.append(asdict(a))
+                continue
+        except Exception:
+            pass
+
+        # plain object with __dict__
+        if hasattr(a, "__dict__"):
+            try:
+                out.append(vars(a))
+                continue
+            except Exception:
+                pass
+
+        # already a mapping
+        if isinstance(a, dict):
+            out.append(a)
+            continue
+
+        # try to coerce to dict (may raise TypeError)
+        try:
+            out.append(dict(a))
+            continue
+        except Exception:
+            out.append({"raw": str(a)})
+
+    return out
 
 
 @mcp.tool
