@@ -4,32 +4,54 @@ from typing import List, Dict, Optional, Tuple
 
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth.providers.google import GoogleProvider
+import fastmcp, logging
+logging.info(f"FastMCP version: {fastmcp.__version__}")
+# --- Read from environment ---
+PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"]  # e.g. https://<your-ngrok>.ngrok-free.app
+GOOGLE_OAUTH_CLIENT_ID = os.environ["GOOGLE_OAUTH_CLIENT_ID"]
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
+GOOGLE_ADS_DEVELOPER_TOKEN = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
+JWT_SIGNING_KEY = os.environ["JWT_SIGNING_KEY"]            # long random string
+TOKEN_ENCRYPTION_KEY = os.environ["TOKEN_ENCRYPTION_KEY"] 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config / Environment (NO hardcoded secrets; use env vars)
-# ─────────────────────────────────────────────────────────────────────────────
-GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
-GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "")  # e.g. https://<ngrok>.ngrok.io
+
+print(f"JWT Signing Key: {JWT_SIGNING_KEY}")
+print(f"Token Encryption Key: {TOKEN_ENCRYPTION_KEY}")
 
 logger = logging.getLogger("google_ads_mcp")
 logging.basicConfig(level=logging.INFO)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FastMCP app (Auth configured via GoogleProvider that reads required env vars)
-# ─────────────────────────────────────────────────────────────────────────────
-auth = GoogleProvider(
-    client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
-    client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
-    base_url=os.environ["PUBLIC_BASE_URL"],   # your https ngrok URL
+auth_provider = GoogleProvider(
+    client_id=GOOGLE_OAUTH_CLIENT_ID,
+    client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+    base_url=PUBLIC_BASE_URL,  # e.g. https://a2d0037ef801.ngrok-free.app
+
+    # Scopes you need from Google
     required_scopes=[
-        "openid", "email", "profile",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
         "https://www.googleapis.com/auth/adwords",
     ],
+
+    # These two make /token return a FastMCP JWT (eyJ...) and store upstream tokens encrypted
+    # jwt_signing_key=os.environ["JWT_SIGNING_KEY"],           # Secret for signing JWT tokens
+    # token_encryption_key=os.environ["TOKEN_ENCRYPTION_KEY"], 
+
+    # Let Claude and localhost complete the OAuth dance
+    allowed_client_redirect_uris=[
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "https://claude.ai/api/mcp/auth_callback",
+    ],
+
+    # redirect_path="/auth/callback",  # default; make sure this exact URI is in Google console
 )
 
-mcp = FastMCP("Google Ads Connector", auth=auth)
+
+
+# Build your MCP server with auth attached
+mcp = FastMCP(name="Google Ads Connector", auth=auth_provider)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Token & Pref Stores (fallbacks only; prefer provider-managed tokens)
