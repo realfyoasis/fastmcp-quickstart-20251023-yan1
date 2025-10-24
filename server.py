@@ -280,5 +280,6 @@ def set_default_account(ctx: Context, customer_id: str) -> Dict:
 # Run (SSE for Claude)
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # IMPORTANT: Claude connects to /sse (not /mcp) for SSE transport
-    mcp.run(transport="sse", host="127.0.0.1", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
