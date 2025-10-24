@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Optional, Tuple
 
 from fastmcp import FastMCP, Context
+from fastmcp.server.auth.providers.google import GoogleProvider
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config / Environment (NO hardcoded secrets; use env vars)
@@ -16,9 +17,19 @@ logger = logging.getLogger("google_ads_mcp")
 logging.basicConfig(level=logging.INFO)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FastMCP app (Auth is configured via ENV — see instructions below)
+# FastMCP app (Auth configured via GoogleProvider that reads required env vars)
 # ─────────────────────────────────────────────────────────────────────────────
-mcp = FastMCP("Google Ads Connector")
+auth = GoogleProvider(
+    client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+    client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+    base_url=os.environ["PUBLIC_BASE_URL"],   # your https ngrok URL
+    required_scopes=[
+        "openid", "email", "profile",
+        "https://www.googleapis.com/auth/adwords",
+    ],
+)
+
+mcp = FastMCP("Google Ads Connector", auth=auth)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Token & Pref Stores (fallbacks only; prefer provider-managed tokens)
